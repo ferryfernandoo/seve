@@ -116,6 +116,19 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Serve static files from public folder (for watermarked images, etc.)
+// ============== STATIC FILE SERVING ==============
+// Serve public folder with proper CORS headers for images
+app.use((req, res, next) => {
+  if (req.path.startsWith('/watermarked-') || req.path.startsWith('/generated-')) {
+    // Allow CORS for generated/watermarked images
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    res.header('Cache-Control', 'public, max-age=86400'); // Cache for 24 hours
+  }
+  next();
+});
+
 app.use(express.static(path.join(process.cwd(), 'public')));
 
 // Passport middleware
@@ -2503,22 +2516,36 @@ async function addWatermarkToImage(imageUrl, watermarkText = 'ORION') {
  */
 async function saveWatermarkedImage(imageBuffer, req) {
   try {
+    // Validate image buffer
+    if (!imageBuffer || imageBuffer.length === 0) {
+      throw new Error('Image buffer is empty');
+    }
+    
+    console.log(`[WATERMARK] Saving image buffer: ${imageBuffer.length} bytes`);
+    
     const filename = `watermarked-${uuidv4()}.png`;
     const filepath = path.join(process.cwd(), 'public', filename);
     
     // Ensure public directory exists
-    if (!fs.existsSync(path.join(process.cwd(), 'public'))) {
-      fs.mkdirSync(path.join(process.cwd(), 'public'), { recursive: true });
+    const publicDir = path.join(process.cwd(), 'public');
+    if (!fs.existsSync(publicDir)) {
+      fs.mkdirSync(publicDir, { recursive: true });
+      console.log(`[WATERMARK] Created public directory: ${publicDir}`);
     }
     
     await fs.promises.writeFile(filepath, imageBuffer);
     console.log(`[WATERMARK] Image saved to: ${filepath}`);
     
-    // Return full backend URL using the actual request host, not hardcoded localhost
-    const protocol = req.protocol || (process.env.NODE_ENV === 'production' ? 'https' : 'http');
-    const host = req.get('host') || `localhost:${PORT}`;
+    // Verify file was actually written
+    const fileStats = fs.statSync(filepath);
+    console.log(`[WATERMARK] File verification: ${fileStats.size} bytes written`);
+    
+    // Return full backend URL - handle proxy headers for Vercel/production
+    // X-Forwarded-Proto and X-Forwarded-Host are set by proxies (Vercel, nginx, etc)
+    const protocol = req.get('X-Forwarded-Proto') || req.protocol || (process.env.NODE_ENV === 'production' ? 'https' : 'http');
+    const host = req.get('X-Forwarded-Host') || req.get('host') || `localhost:${PORT}`;
     const fullUrl = `${protocol}://${host}/${filename}`;
-    console.log(`[WATERMARK] Generated URL for production: ${fullUrl}`);
+    console.log(`[WATERMARK] Generated URL: ${fullUrl} (protocol: ${protocol}, host: ${host})`);
     return fullUrl;
   } catch (err) {
     console.error('[WATERMARK] Error saving watermarked image:', err.message);
@@ -2803,7 +2830,17 @@ app.post('/api/images/generate', async (req, res) => {
     let watermarked = false;
     try {
       console.log('[IMG_GEN] Starting watermark process...');
-      const watermarkedBuffer = await addWatermarkToImage(imageUrl, 'ORION');
+      console.log(`[IMG_GEN] Source image URL: ${imageUrl}`);
+      
+      // Add timeout for watermark process (max 30 seconds)
+      const watermarkPromise = addWatermarkToImage(imageUrl, 'ORION');
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Watermark process timeout (30s)')), 30000)
+      );
+      
+      const watermarkedBuffer = await Promise.race([watermarkPromise, timeoutPromise]);
+      console.log(`[IMG_GEN] Watermark buffer generated: ${watermarkedBuffer.length} bytes`);
+      
       finalImageUrl = await saveWatermarkedImage(watermarkedBuffer, req);
       watermarked = true;
       console.log(`[IMG_GEN] ✅ Watermarked image saved: ${finalImageUrl}`);
@@ -2813,8 +2850,23 @@ app.post('/api/images/generate', async (req, res) => {
       console.log(`[IMG_GEN] ✅ Database updated with watermarked URL`);
     } catch (watermarkErr) {
       console.error('[IMG_GEN] ⚠️  Watermark failed:', watermarkErr.message);
+      console.error('[IMG_GEN] Watermark error stack:', watermarkErr.stack);
+      console.warn('[IMG_GEN] Falling back to original image URL from TokenMix');
       // If watermark fails, continue with original imageUrl
+      finalImageUrl = imageUrl;
+      watermarked = false;
     }
+
+    // Validate final URL before sending response
+    if (!finalImageUrl) {
+      console.error('[IMG_GEN] ❌ CRITICAL: No final image URL available');
+      return res.status(500).json({ 
+        error: 'Failed to save image - no valid URL generated',
+        details: 'Both watermarked and original image URLs failed'
+      });
+    }
+
+    console.log(`[IMG_GEN] 📤 Sending response with URL: ${finalImageUrl}, watermarked: ${watermarked}`);
 
     res.json({
       success: true,
