@@ -221,6 +221,27 @@ const upload = multer({
 // Serve generated files
 app.use('/download', express.static(tempDir));
 app.use('/download', express.static(tempPptDir));
+
+// Serve uploaded files with proper CORS and Content-Type headers
+app.use('/download/uploads', (req, res, next) => {
+  // Add CORS headers for all uploaded files
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Cache-Control', 'public, max-age=86400');
+  
+  // Detect file type and set Content-Type
+  const filepath = req.path;
+  if (filepath.endsWith('.png')) res.header('Content-Type', 'image/png');
+  else if (filepath.endsWith('.jpg') || filepath.endsWith('.jpeg')) res.header('Content-Type', 'image/jpeg');
+  else if (filepath.endsWith('.gif')) res.header('Content-Type', 'image/gif');
+  else if (filepath.endsWith('.webp')) res.header('Content-Type', 'image/webp');
+  else if (filepath.endsWith('.pdf')) res.header('Content-Type', 'application/pdf');
+  
+  console.log(`[UPLOADS] Serving: ${filepath}`);
+  next();
+});
+
 app.use('/download/uploads', express.static(uploadsDir));
 
 /**
@@ -233,18 +254,93 @@ app.post('/api/vision/upload', upload.single('image'), async (req, res) => {
       return res.status(400).json({ error: 'Image file is required' });
     }
 
-    const fileUrl = `${req.protocol}://${req.get('host')}/download/uploads/${encodeURIComponent(req.file.filename)}`;
+    // Use new dedicated endpoint for uploads
+    const fileUrl = `${req.protocol}://${req.get('host')}/api/serve-upload/${encodeURIComponent(req.file.filename)}`;
     console.log('[VISION_UPLOAD] Saved image:', req.file.filename);
+    console.log('[VISION_UPLOAD] File size:', req.file.size, 'bytes');
     console.log('[VISION_UPLOAD] Public URL:', fileUrl);
 
     res.json({
       success: true,
       url: fileUrl,
       filename: req.file.filename,
+      size: req.file.size,
     });
   } catch (err) {
     console.error('[VISION_UPLOAD] Error uploading image:', err);
     res.status(500).json({ error: 'Vision upload failed: ' + err.message });
+  }
+});
+
+/**
+ * GET /api/serve-upload/:filename
+ * Serve uploaded files with proper headers and CORS
+ */
+app.get('/api/serve-upload/:filename', (req, res) => {
+  try {
+    const filename = req.params.filename;
+    
+    // Security: only allow specific file types
+    const allowedExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.txt', '.json', '.csv', '.html', '.md', '.pptx', '.docx'];
+    const fileExt = path.extname(filename).toLowerCase();
+    
+    if (!allowedExtensions.includes(fileExt)) {
+      console.warn(`[SERVE_UPLOAD] ⚠️ Unauthorized file type: ${filename}`);
+      return res.status(403).json({ error: 'File type not allowed' });
+    }
+    
+    const filepath = path.join(uploadsDir, filename);
+    
+    // Security: prevent directory traversal
+    if (!filepath.startsWith(uploadsDir)) {
+      console.warn(`[SERVE_UPLOAD] ⚠️ Directory traversal attempt: ${filepath}`);
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Check if file exists
+    if (!fs.existsSync(filepath)) {
+      console.error(`[SERVE_UPLOAD] ❌ File not found: ${filepath}`);
+      return res.status(404).json({ error: 'File not found', file: filename });
+    }
+    
+    // Read file
+    const fileBuffer = fs.readFileSync(filepath);
+    const fileStats = fs.statSync(filepath);
+    console.log(`[SERVE_UPLOAD] ✅ Serving: ${filename} (${fileBuffer.length} bytes)`);
+    
+    // Set Content-Type based on file extension
+    let contentType = 'application/octet-stream';
+    if (fileExt === '.png') contentType = 'image/png';
+    else if (['.jpg', '.jpeg'].includes(fileExt)) contentType = 'image/jpeg';
+    else if (fileExt === '.gif') contentType = 'image/gif';
+    else if (fileExt === '.webp') contentType = 'image/webp';
+    else if (fileExt === '.pdf') contentType = 'application/pdf';
+    else if (fileExt === '.txt') contentType = 'text/plain';
+    else if (fileExt === '.json') contentType = 'application/json';
+    else if (fileExt === '.csv') contentType = 'text/csv';
+    else if (fileExt === '.html') contentType = 'text/html';
+    else if (fileExt === '.md') contentType = 'text/markdown';
+    else if (fileExt === '.pptx') contentType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    else if (fileExt === '.docx') contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    
+    // Set response headers
+    res.set('Content-Type', contentType);
+    res.set('Content-Length', fileBuffer.length);
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.set('X-Content-Type-Options', 'nosniff');
+    
+    // For images, also set as inline (not attachment) so they display in browser
+    if (fileExt.match(/\.(png|jpg|jpeg|gif|webp)$/i)) {
+      res.set('Content-Disposition', 'inline');
+    }
+    
+    // Send file
+    res.send(fileBuffer);
+  } catch (err) {
+    console.error(`[SERVE_UPLOAD] Error serving file:`, err.message);
+    res.status(500).json({ error: 'Failed to serve file', details: err.message });
   }
 });
 
