@@ -115,21 +115,40 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Serve static files from public folder (for watermarked images, etc.)
 // ============== STATIC FILE SERVING ==============
 // Serve public folder with proper CORS headers for images
 app.use((req, res, next) => {
-  if (req.path.startsWith('/watermarked-') || req.path.startsWith('/generated-')) {
-    // Allow CORS for generated/watermarked images
+  // Check if it's an image request
+  const isImageRequest = req.path.startsWith('/watermarked-') || req.path.startsWith('/generated-') || req.path.endsWith('.png') || req.path.endsWith('.jpg') || req.path.endsWith('.jpeg');
+  
+  if (isImageRequest) {
+    // Add CORS headers for images (allow from everywhere)
     res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    res.header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS, POST');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Access-Control-Max-Age', '86400');
+    res.header('Content-Type', 'image/png');
     res.header('Cache-Control', 'public, max-age=86400'); // Cache for 24 hours
+    res.header('X-Content-Type-Options', 'nosniff');
+    
+    console.log(`[STATIC] Serving image: ${req.path}`);
   }
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  
   next();
 });
 
-app.use(express.static(path.join(process.cwd(), 'public')));
+// Serve public folder with Cache-Control headers
+const publicPath = path.join(process.cwd(), 'public');
+console.log(`[SERVER] Serving static files from: ${publicPath}`);
+app.use(express.static(publicPath, {
+  maxAge: '1d',
+  etag: false
+}));
 
 // Passport middleware
 app.use(passport.initialize());
@@ -2886,6 +2905,178 @@ app.post('/api/images/generate', async (req, res) => {
   } catch (err) {
     console.error('[IMG_GEN] Image generation error:', err);
     res.status(500).json({ error: 'Failed to generate image: ' + err.message });
+  }
+});
+
+// ============== DEBUG: Check Generated Images ==============
+/**
+ * GET /api/debug/images
+ * List all generated images in public folder
+ */
+app.get('/api/debug/images', (req, res) => {
+  try {
+    const publicDir = path.join(process.cwd(), 'public');
+    if (!fs.existsSync(publicDir)) {
+      return res.json({ error: 'Public directory does not exist', path: publicDir });
+    }
+    
+    const files = fs.readdirSync(publicDir);
+    const watermarkedFiles = files.filter(f => f.startsWith('watermarked-') || f.startsWith('generated-'));
+    
+    const fileInfo = watermarkedFiles.map(filename => {
+      const filepath = path.join(publicDir, filename);
+      const stats = fs.statSync(filepath);
+      const protocol = req.get('X-Forwarded-Proto') || req.protocol || 'http';
+      const host = req.get('X-Forwarded-Host') || req.get('host') || `localhost:${PORT}`;
+      const url = `${protocol}://${host}/${filename}`;
+      return {
+        filename,
+        size: stats.size,
+        modified: stats.mtime,
+        url
+      };
+    });
+    
+    res.json({
+      totalFiles: files.length,
+      watermarkedCount: watermarkedFiles.length,
+      files: fileInfo.slice(-10) // Last 10 files
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/debug/image/:filename
+ * Check if specific image exists and is accessible
+ */
+app.get('/api/debug/image/:filename', (req, res) => {
+  try {
+    const filename = req.params.filename;
+    const filepath = path.join(process.cwd(), 'public', filename);
+    
+    // Security: prevent directory traversal
+    if (!filepath.startsWith(path.join(process.cwd(), 'public'))) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({ 
+        error: 'File not found',
+        requestedFile: filename,
+        fullPath: filepath,
+        publicDirExists: fs.existsSync(path.join(process.cwd(), 'public'))
+      });
+    }
+    
+    const stats = fs.statSync(filepath);
+    res.json({
+      filename,
+      size: stats.size,
+      exists: true,
+      path: filepath,
+      mtime: stats.mtime
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============== SERVE WATERMARKED IMAGES ==============
+/**
+ * GET /watermarked/:filename
+ * Serve watermarked image with proper CORS headers
+ */
+app.get('/watermarked/:filename', (req, res) => {
+  try {
+    const filename = req.params.filename;
+    
+    // Security: only allow watermarked files
+    if (!filename.startsWith('watermarked-') && !filename.startsWith('generated-')) {
+      console.warn(`[IMAGES] ⚠️ Unauthorized file access attempt: ${filename}`);
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    const filepath = path.join(process.cwd(), 'public', filename);
+    
+    // Security: prevent directory traversal
+    if (!filepath.startsWith(path.join(process.cwd(), 'public'))) {
+      console.warn(`[IMAGES] ⚠️ Directory traversal attempt: ${filepath}`);
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Check if file exists
+    if (!fs.existsSync(filepath)) {
+      console.error(`[IMAGES] ❌ File not found: ${filepath}`);
+      return res.status(404).json({ error: 'Image not found', file: filename });
+    }
+    
+    // Read and serve file
+    const fileBuffer = fs.readFileSync(filepath);
+    console.log(`[IMAGES] ✅ Serving image: ${filename} (${fileBuffer.length} bytes)`);
+    
+    // Set proper headers
+    res.set('Content-Type', 'image/png');
+    res.set('Content-Length', fileBuffer.length);
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.set('X-Content-Type-Options', 'nosniff');
+    
+    // Send file
+    res.send(fileBuffer);
+  } catch (err) {
+    console.error(`[IMAGES] Error serving image:`, err.message);
+    res.status(500).json({ error: 'Failed to serve image', details: err.message });
+  }
+});
+
+/**
+ * GET /generated/:filename  
+ * Serve generated image with proper CORS headers
+ */
+app.get('/generated/:filename', (req, res) => {
+  try {
+    const filename = req.params.filename;
+    
+    // Security: only allow generated files
+    if (!filename.startsWith('generated-')) {
+      console.warn(`[IMAGES] ⚠️ Unauthorized file access attempt: ${filename}`);
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    const filepath = path.join(process.cwd(), 'public', filename);
+    
+    // Security: prevent directory traversal
+    if (!filepath.startsWith(path.join(process.cwd(), 'public'))) {
+      console.warn(`[IMAGES] ⚠️ Directory traversal attempt: ${filepath}`);
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Check if file exists
+    if (!fs.existsSync(filepath)) {
+      console.error(`[IMAGES] ❌ File not found: ${filepath}`);
+      return res.status(404).json({ error: 'Image not found', file: filename });
+    }
+    
+    // Read and serve file
+    const fileBuffer = fs.readFileSync(filepath);
+    console.log(`[IMAGES] ✅ Serving image: ${filename} (${fileBuffer.length} bytes)`);
+    
+    // Set proper headers
+    res.set('Content-Type', 'image/png');
+    res.set('Content-Length', fileBuffer.length);
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.set('X-Content-Type-Options', 'nosniff');
+    
+    // Send file
+    res.send(fileBuffer);
+  } catch (err) {
+    console.error(`[IMAGES] Error serving image:`, err.message);
+    res.status(500).json({ error: 'Failed to serve image', details: err.message });
   }
 });
 
