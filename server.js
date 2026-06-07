@@ -2498,9 +2498,10 @@ async function addWatermarkToImage(imageUrl, watermarkText = 'ORION') {
 /**
  * Save watermarked image to public folder
  * @param {Buffer} imageBuffer - Image buffer to save
+ * @param {Object} req - Express request object (to get the host)
  * @returns {Promise<string>} - Public URL path
  */
-async function saveWatermarkedImage(imageBuffer) {
+async function saveWatermarkedImage(imageBuffer, req) {
   try {
     const filename = `watermarked-${uuidv4()}.png`;
     const filepath = path.join(process.cwd(), 'public', filename);
@@ -2513,8 +2514,11 @@ async function saveWatermarkedImage(imageBuffer) {
     await fs.promises.writeFile(filepath, imageBuffer);
     console.log(`[WATERMARK] Image saved to: ${filepath}`);
     
-    // Return full backend URL so frontend can load from correct domain
-    const fullUrl = `http://localhost:${PORT}/${filename}`;
+    // Return full backend URL using the actual request host, not hardcoded localhost
+    const protocol = req.protocol || (process.env.NODE_ENV === 'production' ? 'https' : 'http');
+    const host = req.get('host') || `localhost:${PORT}`;
+    const fullUrl = `${protocol}://${host}/${filename}`;
+    console.log(`[WATERMARK] Generated URL for production: ${fullUrl}`);
     return fullUrl;
   } catch (err) {
     console.error('[WATERMARK] Error saving watermarked image:', err.message);
@@ -2800,7 +2804,7 @@ app.post('/api/images/generate', async (req, res) => {
     try {
       console.log('[IMG_GEN] Starting watermark process...');
       const watermarkedBuffer = await addWatermarkToImage(imageUrl, 'ORION');
-      finalImageUrl = await saveWatermarkedImage(watermarkedBuffer);
+      finalImageUrl = await saveWatermarkedImage(watermarkedBuffer, req);
       watermarked = true;
       console.log(`[IMG_GEN] ✅ Watermarked image saved: ${finalImageUrl}`);
 
