@@ -2410,7 +2410,7 @@ app.get('/api/documents/view/xlsx/:fileName', (req, res) => {
 
 // ============== IMAGE GENERATION API ==============
 
-const TOKENMIX_API_KEY = process.env.TOKENMIX_API_KEY || process.env.VITE_TOKENMIX_API_KEY;
+const TOKENMIX_API_KEY = 'sk-tm-hy6dAKg1BXKDpBz0OmQgEa8Rd9brxNje12zDsIbzci9zdj3S';
 const TOKENMIX_API_URL = 'https://api.tokenmix.ai/v1/images/generations';
 
 /**
@@ -2543,11 +2543,6 @@ app.post('/api/images/generate', async (req, res) => {
     if (!prompt || typeof prompt !== 'string') {
       return res.status(400).json({ error: 'Prompt is required' });
     }
-
-    console.log(`[IMG_GEN] 🔴 DEBUG START - TOKENMIX_API_KEY check:`);
-    console.log(`[IMG_GEN] 🔴 process.env.TOKENMIX_API_KEY exists: ${!!process.env.TOKENMIX_API_KEY}`);
-    console.log(`[IMG_GEN] 🔴 process.env.VITE_TOKENMIX_API_KEY exists: ${!!process.env.VITE_TOKENMIX_API_KEY}`);
-    console.log(`[IMG_GEN] 🔴 TOKENMIX_API_KEY value: ${TOKENMIX_API_KEY ? TOKENMIX_API_KEY.substring(0, 20) + '...' : 'UNDEFINED'}`);
 
     if (!TOKENMIX_API_KEY) {
       console.error('[IMG_GEN] TOKENMIX_API_KEY not configured');
